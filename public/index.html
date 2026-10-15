@@ -1,0 +1,289 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Real-time Notifications</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #f4f6fb;
+      margin: 0;
+      padding: 40px 20px;
+      color: #202538;
+    }
+    main {
+      max-width: 650px;
+      margin: auto;
+      background: white;
+      padding: 25px;
+      border-radius: 12px;
+      box-shadow: 0 4px 20px #00000012;
+    }
+    h1 { margin-top: 0; }
+    input, select, textarea, button {
+      padding: 10px;
+      margin: 5px 0;
+      box-sizing: border-box;
+      font: inherit;
+    }
+    input, select, textarea { width: 100%; }
+    button {
+      background: #3458db;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.5; cursor: default; }
+    .notification {
+      padding: 14px;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      margin-top: 10px;
+    }
+    .unread {
+      background: #eef3ff;
+      border-color: #9db3ff;
+    }
+    .notification button { margin-top: 10px; }
+    .status { color: #555; }
+    .error { color: #b42318; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>🔔 Real-time Notifications</h1>
+
+    <section>
+      <h2>Login</h2>
+      <input id="username" value="alice" placeholder="Username" />
+      <button id="loginBtn">Login</button>
+      <p id="status" class="status">Not connected</p>
+      <p>Unread notifications: <strong id="count">0</strong></p>
+    </section>
+
+    <hr />
+
+    <section>
+      <h2>Create Notification</h2>
+      <select id="type">
+        <option value="INFO">INFO</option>
+        <option value="WARNING">WARNING</option>
+        <option value="ORDER">ORDER</option>
+        <option value="SYSTEM">SYSTEM</option>
+      </select>
+      <input id="title" value="Hello Alice" placeholder="Title" />
+      <textarea id="body" placeholder="Message">New notification!</textarea>
+      <button id="createBtn" disabled>Create Notification</button>
+    </section>
+
+    <hr />
+
+    <section>
+      <h2>Notifications</h2>
+      <div class="row">
+        <button id="loadBtn" disabled>Load History</button>
+        <button id="unreadBtn" disabled>Unread Only</button>
+      </div>
+      <div id="notifications"></div>
+    </section>
+  </main>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    let token = "";
+    let socket = null;
+    let notifications = [];
+
+    const $ = (id) => document.getElementById(id);
+
+    function setStatus(message, isError = false) {
+      $("status").textContent = message;
+      $("status").className = isError ? "error" : "status";
+    }
+
+    function enableButtons(enabled) {
+      ["createBtn", "loadBtn", "unreadBtn"].forEach((id) => {
+        $(id).disabled = !enabled;
+      });
+    }
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        ...options,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+          ...options.headers
+        }
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.message || "Request failed");
+      }
+
+      return data;
+    }
+
+    function renderNotifications() {
+      const container = $("notifications");
+      container.replaceChildren();
+
+      if (notifications.length === 0) {
+        container.textContent = "No notifications found.";
+        return;
+      }
+
+      notifications.forEach((notification) => {
+        const item = document.createElement("div");
+        item.className = "notification" +
+          (notification.read ? "" : " unread");
+
+        const heading = document.createElement("h3");
+        heading.textContent = notification.title;
+
+        const message = document.createElement("p");
+        message.textContent = notification.body;
+
+        const details = document.createElement("small");
+        details.textContent =
+          `${notification.type} • ${notification.read ? "Read" : "Unread"}`;
+
+        item.append(heading, message, details);
+
+        if (!notification.read) {
+          const button = document.createElement("button");
+          button.textContent = "Mark as Read";
+          button.onclick = () => markAsRead(notification._id);
+          item.append(button);
+        }
+
+        container.append(item);
+      });
+    }
+
+    async function loadNotifications(unreadOnly = false) {
+      try {
+        const query = unreadOnly
+          ? "?unreadOnly=true"
+          : "?limit=20&unreadOnly=false";
+
+        notifications = await api("/api/notifications" + query);
+        renderNotifications();
+      } catch (error) {
+        setStatus(error.message, true);
+      }
+    }
+
+    async function markAsRead(id) {
+      try {
+        await api(`/api/notifications/${id}/read`, {
+          method: "PATCH"
+        });
+
+        notifications = notifications.map((notification) =>
+          notification._id === id
+            ? { ...notification, read: true }
+            : notification
+        );
+
+        renderNotifications();
+      } catch (error) {
+        setStatus(error.message, true);
+      }
+    }
+
+    $("loginBtn").onclick = async () => {
+      try {
+        const username = $("username").value.trim();
+
+        if (!username) {
+          setStatus("Enter a username", true);
+          return;
+        }
+
+        const response = await fetch("/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.message || "Login failed");
+        }
+
+        if (socket) socket.disconnect();
+
+        token = data.token;
+        notifications = [];
+        renderNotifications();
+        $("count").textContent = "0";
+        enableButtons(true);
+
+        socket = io({
+          auth: { token }
+        });
+
+        socket.on("connect", () => {
+          setStatus(`Connected as ${data.user.username}`);
+        });
+
+        socket.on("connect_error", (error) => {
+          setStatus(`Socket error: ${error.message}`, true);
+        });
+
+        socket.on("disconnect", () => {
+          setStatus("Socket disconnected");
+        });
+
+        socket.on("notification:new", (notification) => {
+          notifications = [
+            notification,
+            ...notifications.filter((n) => n._id !== notification._id)
+          ];
+          renderNotifications();
+        });
+
+        socket.on("notification:count", ({ unread }) => {
+          $("count").textContent = unread;
+        });
+
+        await loadNotifications();
+      } catch (error) {
+        setStatus(error.message, true);
+      }
+    };
+
+    $("createBtn").onclick = async () => {
+      try {
+        const notification = await api("/api/notifications", {
+          method: "POST",
+          body: JSON.stringify({
+            type: $("type").value,
+            title: $("title").value,
+            body: $("body").value
+          })
+        });
+
+        notifications = [
+          notification,
+          ...notifications.filter((n) => n._id !== notification._id)
+        ];
+        renderNotifications();
+      } catch (error) {
+        setStatus(error.message, true);
+      }
+    };
+
+    $("loadBtn").onclick = () => loadNotifications(false);
+    $("unreadBtn").onclick = () => loadNotifications(true);
+  </script>
+</body>
+</html>
